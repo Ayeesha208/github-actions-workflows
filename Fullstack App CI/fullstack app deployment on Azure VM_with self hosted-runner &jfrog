@@ -1,0 +1,165 @@
+name: Fullstack App CI/CD for Azure VM (Fixed)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          path: 'source'
+
+      - name: Verify Python installation
+        run: |
+          echo "🐍 Checking Python installation..."
+          python3 --version
+          pip3 --version
+
+      - name: Install system dependencies
+        run: |
+          echo "🛠 Installing system dependencies..."
+          sudo apt update
+          sudo apt install -y python3-venv python3-pip curl
+          python3 -m pip install --upgrade pip
+
+      - name: Prepare deployment directory
+        run: |
+          echo "📂 Preparing deployment directory..."
+          DEPLOY_DIR="/home/githubvmadmin/app"
+          sudo mkdir -p "$DEPLOY_DIR"
+          sudo chown -R githubvmadmin:githubvmadmin "$DEPLOY_DIR"
+          rsync -av --delete source/ "$DEPLOY_DIR/" --exclude='.git' --exclude='.github'
+
+      - name: Setup Backend Environment
+        run: |
+          echo "🐍 Setting up Python virtual environment..."
+          DEPLOY_DIR="/home/githubvmadmin/app"
+          BACKEND_DIR="$DEPLOY_DIR/CI_CD_DummyCode/backend"
+          
+          # Clean existing venv
+          echo "🧹 Cleaning existing virtual environment..."
+          rm -rf "$BACKEND_DIR/venv"
+          
+          # Create new virtual environment
+          echo "🛠 Creating virtual environment..."
+          cd "$BACKEND_DIR"
+          python3 -m venv venv
+          
+          # Install requirements
+          echo "📦 Installing Python dependencies..."
+          source venv/bin/activate
+          pip install -r ../requirements.txt
+          echo "✅ Backend environment setup complete!"
+
+      - name: Deploy Backend as Background Service
+        run: |
+          echo "🚀 Deploying backend as background service..."
+          DEPLOY_DIR="/home/githubvmadmin/app"
+          BACKEND_DIR="$DEPLOY_DIR/CI_CD_DummyCode/backend"
+          
+          # Create systemd service file
+          echo "📝 Creating backend service..."
+          sudo tee /etc/systemd/system/fullstack-backend.service > /dev/null <<EOF
+          [Unit]
+          Description=Fullstack Backend Service
+          After=network.target
+
+          [Service]
+          User=githubvmadmin
+          Group=githubvmadmin
+          WorkingDirectory=$BACKEND_DIR
+          Environment="PATH=$BACKEND_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          ExecStart=$BACKEND_DIR/venv/bin/python3 app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Reload and enable service
+          echo "🔄 Reloading systemd..."
+          sudo systemctl daemon-reload
+          sudo systemctl enable fullstack-backend.service
+          sudo systemctl restart fullstack-backend.service
+          echo "✅ Backend deployed as systemd service!"
+
+      - name: Deploy Frontend as Background Service
+        run: |
+          echo "🌐 Deploying frontend as background service..."
+          DEPLOY_DIR="/home/githubvmadmin/app"
+          FRONTEND_DIR="$DEPLOY_DIR/CI_CD_DummyCode/frontend"
+          
+          # Create systemd service file
+          echo "📝 Creating frontend service..."
+          sudo tee /etc/systemd/system/fullstack-frontend.service > /dev/null <<EOF
+          [Unit]
+          Description=Fullstack Frontend Service
+          After=network.target
+
+          [Service]
+          User=githubvmadmin
+          Group=githubvmadmin
+          WorkingDirectory=$FRONTEND_DIR
+          ExecStart=/usr/bin/python3 -m http.server 8080 --bind 0.0.0.0
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Reload and enable service
+          echo "🔄 Reloading systemd..."
+          sudo systemctl daemon-reload
+          sudo systemctl enable fullstack-frontend.service
+          sudo systemctl restart fullstack-frontend.service
+          echo "✅ Frontend deployed as systemd service!"
+
+      - name: Verify Services
+        run: |
+          echo "🔍 Verifying services..."
+          sleep 5  # Give services time to start
+          
+          # Check backend service
+          echo "🔙 Checking backend service..."
+          if ! sudo systemctl is-active --quiet fullstack-backend.service; then
+            echo "❌ Backend service not running!"
+            sudo journalctl -u fullstack-backend.service -n 20 --no-pager
+            exit 1
+          fi
+          
+          # Check frontend service
+          echo "🖥 Checking frontend service..."
+          if ! sudo systemctl is-active --quiet fullstack-frontend.service; then
+            echo "❌ Frontend service not running!"
+            sudo journalctl -u fullstack-frontend.service -n 20 --no-pager
+            exit 1
+          fi
+          
+          # Check connectivity
+          echo "🌐 Checking service connectivity..."
+          if ! curl -s -f http://localhost:5000 >/dev/null; then
+            echo "❌ Backend not responding on port 5000!"
+            exit 1
+          fi
+          
+          if ! curl -s -f http://localhost:8080 >/dev/null; then
+            echo "❌ Frontend not responding on port 8080!"
+            exit 1
+          fi
+          
+          echo "✅ All services are running correctly!"
+          echo "Backend URL: http://$(curl -s ifconfig.me):5000"
+          echo "Frontend URL: http://$(curl -s ifconfig.me):8080"
+
+      - name: Open Firewall Ports
+        run: |
+          echo "🔥 Configuring firewall..."
+          sudo ufw allow 5000/tcp
+          sudo ufw allow 8080/tcp
+          echo "✅ Firewall ports 5000 and 8080 opened!"
