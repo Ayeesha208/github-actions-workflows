@@ -1,0 +1,89 @@
+name: Fullstack App CI/CD for Azure VM
+
+on:
+  push:
+    branches:
+      - main
+
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: List directory for debug
+        run: |
+          echo "📂 Listing project files..."
+          ls -R
+
+      - name: Python Syntax Check (Backend)
+        run: |
+          echo "🔍 Running Python syntax checks..."
+          python3 -m py_compile Automation_Test-main/CI_CD_DummyCode/backend/app.py
+
+      - name: Create ZIP Artifact
+        run: |
+          echo "📦 Creating ZIP build artifact..."
+          zip -r fullstack-app-build.zip Automation_Test-main/CI_CD_DummyCode -x "*.git*" "*.github*"
+
+      - name: Upload to JFrog Artifactory
+        run: |
+          echo "⬆️ Uploading to JFrog Artifactory..."
+          curl -H "X-JFrog-Art-Api: ${{ secrets.ARTIFACTORY_API_KEY }}" \
+               -T fullstack-app-build.zip \
+               "${{ secrets.ARTIFACTORY_URL }}/${{ secrets.ARTIFACTORY_REPO }}/fullstack-app/fullstack-app-build-${{ github.run_number }}.zip"
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Code to Azure VM
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} << 'EOF'
+            set -e
+
+            echo "📁 Checking deployment directory..."
+
+            REPO_DIR=~/nextwealth
+
+            # Clone repo if not present
+            if [ ! -d "$REPO_DIR/.git" ]; then
+              echo "📥 Cloning repository..."
+              rm -rf "$REPO_DIR"
+              git clone https://github.com/Ayeesha208/nextwealth.git "$REPO_DIR"
+            else
+              echo "🔁 Resetting repository and pulling latest changes..."
+              cd "$REPO_DIR"
+              git reset --hard HEAD
+              git clean -fd
+              git pull
+            fi
+
+            # Backend setup
+            cd "$REPO_DIR/Automation_Test-main/CI_CD_DummyCode/backend"
+
+            echo "🛠 Installing dependencies..."
+            sudo apt update
+            sudo apt install python-is-python3 -y
+            sudo apt install python3-venv -y
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install flask flask-cors
+
+            echo "🛑 Stopping previous backend..."
+            pkill -f app.py || true
+
+            echo "🚀 Starting backend..."
+            nohup python3 app.py > backend.log 2>&1 &
+
+            # Frontend setup
+            echo "🌐 Starting frontend..."
+            cd ../frontend
+            nohup python3 -m http.server 8080 > frontend.log 2>&1 &
+          EOF
